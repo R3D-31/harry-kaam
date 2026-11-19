@@ -1,0 +1,349 @@
+import csv
+import json
+import os
+import re
+import time
+import easyocr
+import instaloader
+
+
+class InstagramSeLeadsNikaalnaAgent:
+    def __init__(
+        self,
+        target_hashtags=None,
+        target_profiles=None,
+        limit=10,
+        banners_dir="banners",
+        csv_output_path="data/leads_from_instagram.csv",
+        history_path="data/seen_leads_history.json",
+    ):
+        self.target_hashtags = target_hashtags or [
+            "B2BDMC",
+            "DubaiDMC",
+            "BaliDMC",
+            "TravelAgentB2B",
+        ]
+        self.target_profiles = target_profiles or []
+        self.limit = limit
+        self.banners_dir = banners_dir
+        self.csv_output_path = csv_output_path
+        self.history_path = history_path
+
+        os.makedirs(self.banners_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(self.csv_output_path), exist_ok=True)
+        os.makedirs(os.path.dirname(self.history_path), exist_ok=True)
+
+        self.loader = instaloader.Instaloader(
+            dirname_pattern=self.banners_dir,
+            download_videos=False,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+        )
+
+        print("Loading EasyOCR model for banner text extraction...")
+        self.ocr_reader = easyocr.Reader(["en"], gpu=False)
+        self.seen_history = self._load_history()
+
+    def _load_history(self):
+        if os.path.exists(self.history_path):
+            try:
+                with open(self.history_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return {
+                        "phones": set(data.get("phones", [])),
+                        "emails": set(data.get("emails", [])),
+                        "links": set(data.get("links", [])),
+                    }
+            except Exception as e:
+                print(f"[History Warning] Could not read history file: {e}")
+        return {"phones": set(), "emails": set(), "links": set()}
+
+    def _save_history(self):
+        payload = {
+            "phones": sorted(list(self.seen_history["phones"])),
+            "emails": sorted(list(self.seen_history["emails"])),
+            "links": sorted(list(self.seen_history["links"])),
+        }
+        with open(self.history_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    def _is_duplicate(self, number, email, link):
+        norm_phone = re.sub(r"\D", "", number or "")
+        norm_email = (email or "").strip().lower()
+        norm_link = (link or "").strip().lower()
+
+        if norm_phone and norm_phone in self.seen_history["phones"]:
+            return True
+        if norm_email and norm_email in self.seen_history["emails"]:
+            return True
+        if norm_link and norm_link in self.seen_history["links"]:
+            return True
+        return False
+
+    def _mark_as_seen(self, number, email, link):
+        norm_phone = re.sub(r"\D", "", number or "")
+        norm_email = (email or "").strip().lower()
+        norm_link = (link or "").strip().lower()
+
+        if norm_phone:
+            self.seen_history["phones"].add(norm_phone)
+        if norm_email:
+            self.seen_history["emails"].add(norm_email)
+        if norm_link:
+            self.seen_history["links"].add(norm_link)
+
+    def extract_number(self, text):
+        pattern = r"(?:\+?\d{1,3}[\s\-]?)?(?:\(?\d{2,5}\)?[\s\-]?)?\d{5}[\s\-]?\d{5}"
+        matches = re.findall(pattern, text)
+        for m in matches:
+            digits = re.sub(r"\D", "", m)
+            if 10 <= len(digits) <= 13:
+                if len(digits) == 10:
+                    digits = "91" + digits
+                return digits
+        return ""
+
+    def extract_email(self, text):
+        match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
+        return match.group(0).strip() if match else ""
+
+    def extract_location(self, text):
+        locations = [
+            "Delhi", "New Delhi", "Mumbai", "Gurugram", "Gurgaon", "Noida",
+            "Bengaluru", "Bangalore", "Chennai", "Hyderabad", "Kolkata",
+            "Jaipur", "Udaipur", "Goa", "Ahmedabad", "Pune", "Chandigarh",
+            "Dubai", "Bali", "Vietnam", "Thailand", "Singapore", "Malaysia",
+            "Sri Lanka", "Maldives", "Baku", "Europe"
+        ]
+        found = [
+            loc for loc in locations
+            if re.search(rf"\b{re.escape(loc)}\b", text, re.IGNORECASE)
+        ]
+        if found:
+            return ", ".join(dict.fromkeys(found))
+        return "India"
+
+    def extract_name(self, text, fallback_username=""):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        keywords = [
+            "company", "travels", "holidays", "tours", "dmc",
+            "hospitality", "escapes", "vacations", "trips", "solutions"
+        ]
+        for line in lines[:8]:
+            if any(k in line.lower() for k in keywords) and len(line) <= 60:
+                return line
+        return fallback_username if fallback_username else "Unknown Company"
+
+    def read_banner_text(self, image_path):
+        try:
+            results = self.ocr_reader.readtext(image_path, detail=0)
+            return "\n".join(results)
+        except Exception as e:
+            print(f"[OCR Warning] Could not read {image_path}: {e}")
+            return ""
+
+    def _process_post(self, post, source_label):
+        caption = post.caption or ""
+        owner = post.owner_username or source_label
+        shortcode = post.shortcode or "post"
+        link = f"instagram@{shortcode}"
+
+        self.loader.download_post(post, target=self.banners_dir)
+        jpgs = sorted(
+            [
+                os.path.join(self.banners_dir, f)
+                for f in os.listdir(self.banners_dir)
+                if f.lower().endswith((".jpg", ".jpeg", ".png"))
+            ],
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        banner_text = self.read_banner_text(jpgs[0]) if jpgs else ""
+        combined_text = f"{banner_text}\n{caption}"
+
+        number = self.extract_number(combined_text)
+        email = self.extract_email(combined_text)
+
+        if not number and not email:
+            return None
+
+        if self._is_duplicate(number, email, link):
+            print(f"[Duplicate Skipped] {number or email} ({link})")
+            return None
+
+        lead = {
+            "name": self.extract_name(combined_text, fallback_username=owner),
+            "number": number,
+            "email": email,
+            "location": self.extract_location(combined_text),
+            "link": link,
+        }
+        self._mark_as_seen(number, email, link)
+        return lead
+
+    def fetch_from_profiles(self, usernames=None, posts_per_profile=10, ig_username=None, ig_password=None):
+        profiles = usernames or self.target_profiles
+        new_leads = []
+
+        if ig_username and ig_password:
+            try:
+                self.loader.login(ig_username, ig_password)
+                print("Logged into Instagram successfully.")
+            except Exception as e:
+                print(f"[IG Login Warning] Continuing without login: {e}")
+
+        for username in profiles:
+            clean_user = username.lstrip("@").strip()
+            if not clean_user or len(new_leads) >= self.limit:
+                break
+            print(f"\nScanning public Instagram profile @{clean_user} for fresh leads...")
+            try:
+                profile = instaloader.Profile.from_username(self.loader.context, clean_user)
+                checked = 0
+                for post in profile.get_posts():
+                    if len(new_leads) >= self.limit or checked >= posts_per_profile:
+                        break
+                    checked += 1
+
+                    lead = self._process_post(post, source_label=clean_user)
+                    if lead:
+                        new_leads.append(lead)
+                        print(
+                            f"[New Lead {len(new_leads)}] {lead['name']} | {lead['number']} | "
+                            f"{lead['email']} | {lead['location']} | {lead['link']}"
+                        )
+                    time.sleep(2.5)
+            except Exception as e:
+                print(f"[Profile Fetch Notice] @{clean_user} skipped ({e}).")
+
+        self._save_history()
+        return new_leads[: self.limit]
+
+    def scan_local_banners_fallback(self):
+        new_leads = []
+        for fname in sorted(os.listdir(self.banners_dir)):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                img_path = os.path.join(self.banners_dir, fname)
+                link = f"instagram@{fname}"
+                ocr_text = self.read_banner_text(img_path)
+
+                number = self.extract_number(ocr_text)
+                email = self.extract_email(ocr_text)
+                if not number and not email:
+                    continue
+
+                if self._is_duplicate(number, email, link):
+                    print(f"[Duplicate Skipped] {link}")
+                    continue
+
+                name = self.extract_name(ocr_text, fallback_username=os.path.splitext(fname)[0])
+                location = self.extract_location(ocr_text)
+
+                lead = {
+                    "name": name,
+                    "number": number,
+                    "email": email,
+                    "location": location,
+                    "link": link,
+                }
+                new_leads.append(lead)
+                self._mark_as_seen(number, email, link)
+
+                if len(new_leads) >= self.limit:
+                    break
+        return new_leads
+
+    def fetch_new_leads(self, ig_username=None, ig_password=None):
+        new_leads = []
+
+        if self.target_profiles:
+            new_leads.extend(
+                self.fetch_from_profiles(
+                    usernames=self.target_profiles,
+                    ig_username=ig_username,
+                    ig_password=ig_password,
+                )
+            )
+
+        if len(new_leads) < self.limit and self.target_hashtags:
+            if ig_username and ig_password:
+                try:
+                    self.loader.login(ig_username, ig_password)
+                except Exception:
+                    pass
+
+            for tag in self.target_hashtags:
+                if len(new_leads) >= self.limit:
+                    break
+                print(f"\nScanning Instagram hashtag #{tag} for fresh leads...")
+                try:
+                    hashtag_posts = instaloader.Hashtag.from_name(self.loader.context, tag).get_posts()
+                    checked = 0
+                    for post in hashtag_posts:
+                        if len(new_leads) >= self.limit or checked >= 20:
+                            break
+                        checked += 1
+
+                        lead = self._process_post(post, source_label=tag)
+                        if lead:
+                            new_leads.append(lead)
+                            print(
+                                f"[New Lead {len(new_leads)}] {lead['name']} | {lead['number']} | "
+                                f"{lead['email']} | {lead['location']} | {lead['link']}"
+                            )
+                        time.sleep(2.0)
+
+                except Exception as e:
+                    print(f"[Instagram Fetch Notice] Hashtag #{tag} skipped ({e}).")
+
+        if not new_leads:
+            print("\nChecking local banners/ folder for unprocessed banner images...")
+            new_leads = self.scan_local_banners_fallback()
+
+        self._save_history()
+        return new_leads[: self.limit]
+
+    def save_to_csv(self, leads, append=True):
+        fieldnames = ["sr.no", "name", "number", "email", "location", "link"]
+        file_exists = os.path.exists(self.csv_output_path) and os.path.getsize(self.csv_output_path) > 0
+
+        existing_rows = []
+        if append and file_exists:
+            with open(self.csv_output_path, mode="r", newline="", encoding="utf-8") as rf:
+                reader = csv.DictReader(rf)
+                for row in reader:
+                    if row.get("name") != "leads from instagram":
+                        existing_rows.append(row)
+
+        next_sr = len(existing_rows) + 1
+        new_formatted_rows = []
+        for lead in leads:
+            new_formatted_rows.append({
+                "sr.no": next_sr,
+                "name": lead["name"],
+                "number": lead["number"],
+                "email": lead["email"],
+                "location": lead["location"],
+                "link": lead["link"],
+            })
+            next_sr += 1
+
+        all_rows = existing_rows + new_formatted_rows if append else new_formatted_rows
+
+        with open(self.csv_output_path, mode="w", newline="", encoding="utf-8") as wf:
+            writer = csv.DictWriter(wf, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow({
+                "sr.no": "",
+                "name": "leads from instagram",
+                "number": "",
+                "email": "",
+                "location": "",
+                "link": "",
+            })
+            writer.writerows(all_rows)
+
+        print(f"-> Saved {len(new_formatted_rows)} new non-duplicate leads to {self.csv_output_path}")
+        return all_rows
