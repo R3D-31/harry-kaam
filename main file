@@ -1,0 +1,41 @@
+#main.py
+
+import csv
+import os
+from agents.instagram_scraper import InstagramLeadScraperAgent
+
+
+def save_leads_to_csv(leads, filepath="data/extracted_leads.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    fieldnames = ["company_name", "phone", "dmc_location", "source"]
+    with open(filepath, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(leads)
+    print(f"\n-> Saved {len(leads)} leads to {filepath}")
+
+
+def main():
+    print("==========================================================")
+    print("   TOURISM B2B AUTOMATION - Instagram Lead Scraper")
+    print("==========================================================")
+
+    scraper = InstagramLeadScraperAgent(
+        target_hashtags=["DubaiDMC", "BaliDMC", "VietnamDMC", "SriLankaDMC", "B2BTourism"],
+        limit=10,
+        banners_dir="banners",
+    )
+
+    leads = scraper.fetch_leads()
+
+    if leads:
+        print("\n--- Extracted Top B2B Leads ---")
+        for idx, lead in enumerate(leads, start=1):
+            print(f"{idx}. Company: {lead['company_name']} | Phone: {lead['phone']} | DMC: {lead['dmc_location']}")
+        save_leads_to_csv(leads)
+    else:
+        print("\nNo leads extracted yet. Tip: Use a separate/test IG login in fetch_leads() or place banner images in 'banners/' to test OCR.")
+
+
+if __name__ == "__main__":
+    main()
