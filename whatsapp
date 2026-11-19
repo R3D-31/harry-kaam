@@ -1,0 +1,65 @@
+import os
+import time
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class WhatsAppOutreachAgent:
+    def __init__(self, dry_run=False):
+        self.dry_run = dry_run
+        self.phone_number_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+        self.access_token = os.getenv("WHATSAPP_ACCESS_TOKEN")
+        self.api_url = f"https://graph.facebook.com/v21.0/{self.phone_number_id}/messages"
+        print(f"Initializing WhatsApp Outreach Agent (dry_run={self.dry_run})...")
+
+    def send_test_template(self, recipient_phone):
+        # Number se '+' ya spaces hatana (Meta API ko sirf digits chahiye, jaise 919876543210)
+        clean_phone = "".join(filter(str.isdigit, recipient_phone))
+
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": clean_phone,
+            "type": "template",
+            "template": {
+                "name": "hello_world",
+                "language": {"code": "en_US"},
+            },
+        }
+
+        response = requests.post(self.api_url, headers=headers, json=payload, timeout=15)
+        return response.status_code, response.json()
+
+    def send_messages_to_leads(self, leads_list):
+        outreach_logs = []
+        for lead in leads_list:
+            phone = lead["phone"]
+            name = lead["company_name"]
+            location = lead.get("dmc_location", "")
+
+            if self.dry_run:
+                print(f"[DRY RUN] Would send to {name} ({phone}) [{location}]")
+                status = "DryRun_Logged"
+            else:
+                code, resp = self.send_test_template(phone)
+                if code == 200:
+                    print(f"-> Sent WhatsApp to {name} ({phone})! Message ID: {resp['messages'][0]['id']}")
+                    status = "Sent"
+                else:
+                    print(f"-> Failed for {name} ({phone}): {resp}")
+                    status = "Failed"
+
+            time.sleep(0.5)
+            outreach_logs.append({
+                "phone": phone,
+                "name": name,
+                "dmc_location": location,
+                "status": status,
+            })
+
+        return outreach_logs
