@@ -1,0 +1,148 @@
+#instagram
+
+import os
+import re
+import time
+import instaloader
+import easyocr
+
+
+class InstagramLeadScraperAgent:
+    def __init__(self, target_hashtags=None, limit=10, banners_dir="banners"):
+        self.target_hashtags = target_hashtags or ["B2BDMC", "DubaiDMC", "BaliDMC", "TravelAgentB2B"]
+        self.limit = limit
+        self.banners_dir = banners_dir
+        os.makedirs(self.banners_dir, exist_ok=True)
+
+        self.loader = instaloader.Instaloader(
+            dirname_pattern=self.banners_dir,
+            download_videos=False,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+        )
+
+        print("Loading EasyOCR model for banner text extraction...")
+        self.ocr_reader = easyocr.Reader(["en"], gpu=False)
+
+    def extract_phone_numbers(self, text):
+        pattern = r"(?:\+?\d{1,3}[\s\-]?)?(?:\(?\d{2,5}\)?[\s\-]?)?\d{5}[\s\-]?\d{5}"
+        matches = re.findall(pattern, text)
+        cleaned = []
+        for m in matches:
+            digits = re.sub(r"\D", "", m)
+            if 10 <= len(digits) <= 13:
+                if len(digits) == 10:
+                    digits = "91" + digits
+                cleaned.append("+" + digits)
+        return list(dict.fromkeys(cleaned))
+
+    def extract_dmc_location(self, text):
+        destinations = [
+            "Dubai", "UAE", "Bali", "Indonesia", "Vietnam", "Thailand",
+            "Sri Lanka", "Singapore", "Malaysia", "Maldives", "Baku",
+            "Azerbaijan", "Georgia", "Europe", "Himachal", "Kashmir",
+            "Kerala", "Goa", "Rajasthan", "Andaman", "North East"
+        ]
+        found = [dest for dest in destinations if re.search(rf"\b{re.escape(dest)}\b", text, re.IGNORECASE)]
+        if found:
+            return ", ".join(dict.fromkeys(found)) + " DMC"
+        return "General B2B DMC"
+
+    def extract_company_name(self, text, fallback_username=""):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        keywords = ["travels", "holidays", "tours", "dmc", "hospitality", "escapes", "vacations", "trips", "world"]
+        for line in lines[:8]:
+            if any(k in line.lower() for k in keywords) and len(line) <= 60:
+                return line
+        return fallback_username if fallback_username else "Unknown Travel Partner"
+
+    def read_banner_text(self, image_path):
+        try:
+            results = self.ocr_reader.readtext(image_path, detail=0)
+            return "\n".join(results)
+        except Exception as e:
+            print(f"[OCR Warning] Could not read {image_path}: {e}")
+            return ""
+
+    def scan_local_banners_fallback(self):
+        leads = []
+        for fname in os.listdir(self.banners_dir):
+            if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                img_path = os.path.join(self.banners_dir, fname)
+                ocr_text = self.read_banner_text(img_path)
+                phones = self.extract_phone_numbers(ocr_text)
+                if phones:
+                    leads.append({
+                        "company_name": self.extract_company_name(ocr_text),
+                        "phone": phones[0],
+                        "dmc_location": self.extract_dmc_location(ocr_text),
+                        "source": f"Local Banner ({fname})",
+                    })
+                if len(leads) >= self.limit:
+                    break
+        return leads
+
+    def fetch_leads(self, ig_username=None, ig_password=None):
+        leads = []
+        seen_phones = set()
+
+        if ig_username and ig_password:
+            try:
+                self.loader.login(ig_username, ig_password)
+                print("Logged into Instagram successfully.")
+            except Exception as e:
+                print(f"[IG Login Warning] Continuing without login: {e}")
+
+        for tag in self.target_hashtags:
+            if len(leads) >= self.limit:
+                break
+            print(f"\nScanning Instagram hashtag #{tag}...")
+            try:
+                hashtag_posts = instaloader.Hashtag.from_name(self.loader.context, tag).get_posts()
+                checked = 0
+                for post in hashtag_posts:
+                    if len(leads) >= self.limit or checked >= 15:
+                        break
+                    checked += 1
+
+                    caption = post.caption or ""
+                    owner = post.owner_username or ""
+
+                    self.loader.download_post(post, target=self.banners_dir)
+                    jpgs = sorted(
+                        [os.path.join(self.banners_dir, f) for f in os.listdir(self.banners_dir) if f.endswith(".jpg")],
+                        key=os.path.getmtime,
+                        reverse=True,
+                    )
+                    banner_text = self.read_banner_text(jpgs[0]) if jpgs else ""
+                    combined_text = f"{banner_text}\n{caption}"
+
+                    phones = self.extract_phone_numbers(combined_text)
+                    if not phones:
+                        continue
+
+                    primary_phone = phones[0]
+                    if primary_phone in seen_phones:
+                        continue
+
+                    seen_phones.add(primary_phone)
+                    lead = {
+                        "company_name": self.extract_company_name(combined_text, fallback_username=owner),
+                        "phone": primary_phone,
+                        "dmc_location": self.extract_dmc_location(combined_text),
+                        "source": f"#{tag} (@{owner})",
+                    }
+                    leads.append(lead)
+                    print(f"[Lead {len(leads)}] {lead['company_name']} | {lead['phone']} | {lead['dmc_location']}")
+                    time.sleep(1.5)
+
+            except Exception as e:
+                print(f"[Instagram Fetch Notice] Hashtag #{tag} skipped ({e}).")
+
+        if not leads:
+            print("\nChecking local banners/ folder for downloaded images...")
+            leads = self.scan_local_banners_fallback()
+
+        return leads[: self.limit]
