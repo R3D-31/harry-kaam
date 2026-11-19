@@ -1,0 +1,29 @@
+from agents.instagram_se_leads_nikaalna import InstagramSeLeadsNikaalnaAgent
+
+
+def main():
+    print("==========================================================")
+    print("   TOURISM B2B AUTOMATION - Instagram Se Leads Nikaalna")
+    print("==========================================================")
+
+    agent = InstagramSeLeadsNikaalnaAgent(
+        target_hashtags=["B2BDMC", "DubaiDMC", "BaliDMC", "TravelAgentB2B"],
+        limit=10,
+        banners_dir="banners",
+        csv_output_path="data/leads_from_instagram.csv",
+        history_path="data/seen_leads_history.json",
+    )
+
+    leads = agent.fetch_new_leads()
+    all_rows = agent.save_to_csv(leads, append=True)
+
+    print(f"\nTotal unique leads in CSV: {len(all_rows)}")
+    for row in all_rows:
+        print(
+            f"{row['sr.no']} | {row['name']} | {row['number']} | "
+            f"{row['email']} | {row['location']} | {row['link']}"
+        )
+
+
+if __name__ == "__main__":
+    main()
